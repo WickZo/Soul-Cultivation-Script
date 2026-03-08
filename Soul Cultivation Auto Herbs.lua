@@ -1,356 +1,427 @@
--- LOAD ORION LIBRARY
+--// ORION UI
 local OrionLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/jensonhirst/Orion/main/source"))()
-local Window = OrionLib:MakeWindow({Name = "Blood Flower Collector", HidePremium = true, SaveConfig = true, ConfigFolder = "BloodFlowerCollector"})
 
--- SERVICES
-local workspace = game:GetService("Workspace")
-local userInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
+local Window = OrionLib:MakeWindow({
+	Name = "Herb / Treasure / Altar Automation",
+	HidePremium = true,
+	SaveConfig = false
+})
+
+--// SERVICES
 local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
 local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
-local currentIndex = 1
-local isMoving = false
-local isActive = false
-local currentTween = nil
-local maxFlowers = 53
-local atFlower = false
-local waitingForAdorneeClear = false
-local harvestTimeout = nil
-local timeoutDuration = 3 -- default
-local isFloating = false
-local bodyVelocity = nil
-local bodyGyro = nil
 
--- Flower type to farm (nil = all, or set to specific flower)
-local targetFlowerType = "Blood Flowers"
+--// REMOTES
+local HarvestRemote = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("Harvest")
 
--- Movement speed (default)
-local MOVE_SPEED = 450
+--// VARIABLES
+local herbRunning = false
+local treasureRunning = false
+local altarRunning = false
 
--- Harvest remote
-local harvestRemote = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("Harvest")
+local herbThread = nil
+local treasureThread = nil
+local altarThread = nil
 
--- FUNCTIONS DECLARED
-local getBloodFlowerByIndex
-local flowerExistsAtIndex
-local findNextExistingIndex
-local stopMovement
-local startFloating
-local stopFloating
-local fireHarvestRemote
-local moveToFlower
-local moveToNextFlower
-local startCollection
-local stopCollection
-local setupHarvestPrompt
-local startHarvestTimeout
-local stopHarvestTimeout
-local onCharacterAdded
+local moving = false
 
--- ================== ORION UI ==================
-local MainTab = Window:MakeTab({Name = "Settings", Icon = "rbxassetid://4483345998", PremiumOnly = false})
+local selectedHerb = "Blood Flowers"
 
--- Speed slider
-MainTab:AddSlider({
-    Name = "Movement Speed",
-    Min = 0,
-    Max = 600,
-    Default = MOVE_SPEED,
-    Color = Color3.fromRGB(0,170,255),
-    Increment = 10,
-    ValueName = "studs/sec",
-    Callback = function(value)
-        MOVE_SPEED = value
-    end
-})
-
--- Timeout slider
-MainTab:AddSlider({
-    Name = "Harvest Timeout",
-    Min = 1,
-    Max = 10,
-    Default = timeoutDuration,
-    Color = Color3.fromRGB(255,170,0),
-    Increment = 0.5,
-    ValueName = "seconds",
-    Callback = function(value)
-        timeoutDuration = value
-    end
-})
-
--- Flower selection dropdown
-local allFlowers = {
-    "Blood Flowers",
-    "Ginseng",
-    "Lingzhi",
-    "Moonlight Flowers",
-    "Qilin Berries",
-    "Spirit Grass",
-    "Taixian",
-    "Twilight Bloom",
-    "Yang Flower",
-    "Yin Bush"
+local treasureSelection = {
+	Common = false,
+	Rare = false,
+	["Very Rare"] = false,
+	Lost = false
 }
 
-MainTab:AddDropdown({
-    Name = "Target Flower",
-    Default = targetFlowerType,
-    Options = allFlowers,
-    Callback = function(value)
-        targetFlowerType = value
-    end
-})
+local tweenSpeed = 300
+local timeoutDuration = 3
 
--- Start/Stop button
-MainTab:AddButton({
-    Name = "Start / Stop Collection",
-    Callback = function()
-        if isActive then
-            stopCollection()
-        else
-            startCollection()
-        end
-    end
-})
+--// FAST OPEN
+local function fastOpen(chest)
 
--- ================== SCRIPT LOGIC ==================
+	for _,prompt in ipairs(chest:GetDescendants()) do
 
--- Character respawn handler
-onCharacterAdded = function(character)
-    stopFloating()
-    if isActive then
-        task.wait(3)
-        if isActive then
-            local flower = getBloodFlowerByIndex(currentIndex)
-            if flower then
-                moveToFlower(flower)
-            else
-                moveToNextFlower()
-            end
-        end
-    end
-end
-player.CharacterAdded:Connect(onCharacterAdded)
+		if prompt:IsA("ProximityPrompt") then
 
--- Get flower by index
-getBloodFlowerByIndex = function(index)
-    local success, flower = pcall(function()
-        local herbsFolder = workspace:FindFirstChild("Herbs")
-        if not herbsFolder then return nil end
+			pcall(function()
+				prompt.HoldDuration = 0
+			end)
 
-        local flowerFolders
-        if targetFlowerType and targetFlowerType ~= "" then
-            flowerFolders = {targetFlowerType}
-        else
-            flowerFolders = allFlowers
-        end
+			for i=1,3 do
+				fireproximityprompt(prompt,0)
+				task.wait(0.05)
+			end
 
-        for _, folderName in ipairs(flowerFolders) do
-            local flowerFolder = herbsFolder:FindFirstChild(folderName)
-            if flowerFolder then
-                local innerFolder = flowerFolder:FindFirstChild("Folder")
-                if innerFolder then
-                    local children = innerFolder:GetChildren()
-                    if children[index] then
-                        return children[index]
-                    end
-                end
-            end
-        end
-        return nil
-    end)
-    if success and flower then return flower end
-    return nil
+			return
+		end
+	end
+
 end
 
--- Check if flower exists
-flowerExistsAtIndex = function(index)
-    return getBloodFlowerByIndex(index) ~= nil
+--// CHARACTER
+local function getCharacter()
+	return player.Character or player.CharacterAdded:Wait()
 end
 
--- Find next existing flower
-findNextExistingIndex = function(startFrom)
-    for i = startFrom, maxFlowers do
-        if flowerExistsAtIndex(i) then return i end
-    end
-    for i = 1, startFrom - 1 do
-        if flowerExistsAtIndex(i) then return i end
-    end
-    return nil
+--// FLY
+local function enableFly()
+
+	local char = getCharacter()
+	local hrp = char:WaitForChild("HumanoidRootPart")
+
+	local bv = Instance.new("BodyVelocity")
+	bv.MaxForce = Vector3.new(999999,999999,999999)
+	bv.Velocity = Vector3.new(0,0,0)
+	bv.Parent = hrp
+
+	return bv
+
 end
 
--- Stop movement
-stopMovement = function()
-    if currentTween then currentTween:Cancel() currentTween = nil end
-    isMoving = false
+--// SAFE MOVE
+local function moveTo(pos)
+
+	if moving then return end
+	moving = true
+
+	local char = getCharacter()
+	local hrp = char:WaitForChild("HumanoidRootPart")
+
+	local dist = (hrp.Position - pos).Magnitude
+	local time = dist / math.max(tweenSpeed,1)
+
+	local tween = TweenService:Create(
+		hrp,
+		TweenInfo.new(time,Enum.EasingStyle.Linear),
+		{CFrame = CFrame.new(pos + Vector3.new(0,3,0))}
+	)
+
+	tween:Play()
+	tween.Completed:Wait()
+
+	moving = false
+
 end
 
--- Floating
-startFloating = function()
-    stopFloating()
-    local character = player.Character
-    if not character then return end
-    local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    bodyVelocity = Instance.new("BodyVelocity")
-    bodyVelocity.MaxForce = Vector3.new(4000,4000,4000)
-    bodyVelocity.Velocity = Vector3.new(0,0,0)
-    bodyVelocity.Parent = hrp
-    bodyGyro = Instance.new("BodyGyro")
-    bodyGyro.MaxTorque = Vector3.new(4000,4000,4000)
-    bodyGyro.CFrame = CFrame.new(hrp.Position)
-    bodyGyro.Parent = hrp
-    isFloating = true
+--// HERB LOOP
+local function herbLoop()
+
+	while herbRunning do
+
+		local herbFolder = Workspace.Herbs:FindFirstChild(selectedHerb)
+
+		if herbFolder then
+
+			local container = herbFolder:FindFirstChild("Folder")
+
+			if container then
+
+				for _,herb in ipairs(container:GetChildren()) do
+
+					if not herbRunning then break end
+
+					local pos = herb:GetPivot().Position
+
+					moveTo(pos)
+
+					local prompt = player.PlayerGui:FindFirstChild("harvestPrompt")
+
+					local start = tick()
+
+					-- wait for adornee appear
+					while tick()-start < timeoutDuration do
+
+						if prompt and prompt.Adornee then
+							break
+						end
+
+						task.wait(0.1)
+
+					end
+
+					local fly = enableFly()
+
+					-- press E once
+					HarvestRemote:FireServer()
+
+					local harvestStart = tick()
+
+					-- wait for adornee disappear
+					while tick()-harvestStart < timeoutDuration do
+
+						if not prompt or not prompt.Adornee then
+							break
+						end
+
+						task.wait(0.2)
+
+					end
+
+					if fly then
+						fly:Destroy()
+					end
+
+					task.wait(0.3)
+
+				end
+
+			end
+
+		end
+
+		task.wait(0.5)
+
+	end
+
 end
 
-stopFloating = function()
-    if bodyVelocity then bodyVelocity:Destroy() bodyVelocity=nil end
-    if bodyGyro then bodyGyro:Destroy() bodyGyro=nil end
-    isFloating = false
+--// TREASURE LOOP
+local function treasureLoop()
+
+	while treasureRunning do
+
+		for _,treasure in ipairs(Workspace.Treasures:GetChildren()) do
+
+			if not treasureRunning then break end
+
+			local name = treasure.Name
+			local allowed = false
+
+			if name:find("Very Rare") and treasureSelection["Very Rare"] then
+				allowed = true
+
+			elseif name:find("Rare") and treasureSelection.Rare then
+				allowed = true
+
+			elseif name:find("Common") and treasureSelection.Common then
+				allowed = true
+
+			elseif name:find("Lost") and treasureSelection.Lost then
+				allowed = true
+			end
+
+			if allowed then
+
+				moveTo(treasure:GetPivot().Position)
+
+				fastOpen(treasure)
+
+				task.wait(0.2)
+
+			end
+
+		end
+
+		task.wait(0.5)
+
+	end
+
 end
 
-fireHarvestRemote = function()
-    startFloating()
-    local success, err = pcall(function()
-        harvestRemote:FireServer()
-    end)
-    startHarvestTimeout()
+--// ALTARS
+local altarPrompts = {}
+
+for _,obj in ipairs(Workspace.Altars:GetDescendants()) do
+	if obj:IsA("ProximityPrompt") then
+		table.insert(altarPrompts,obj)
+	end
 end
 
-startHarvestTimeout = function()
-    stopHarvestTimeout()
-    harvestTimeout = tick() + timeoutDuration
-    task.spawn(function()
-        while waitingForAdorneeClear and isActive do
-            if tick() >= harvestTimeout then
-                stopFloating()
-                waitingForAdorneeClear = false
-                atFlower = false
-                if isActive then
-                    moveToNextFlower()
-                end
-                break
-            end
-            task.wait(0.5)
-        end
-    end)
+local function altarLoop()
+
+	while altarRunning do
+
+		for _,prompt in ipairs(altarPrompts) do
+
+			if not altarRunning then break end
+
+			local part = prompt.Parent
+
+			if part then
+
+				moveTo(part:GetPivot().Position)
+
+				pcall(function()
+					prompt.HoldDuration = 0
+				end)
+
+				fireproximityprompt(prompt,0)
+
+			end
+
+		end
+
+		task.wait(1)
+
+	end
+
 end
 
-stopHarvestTimeout = function()
-    harvestTimeout = nil
-end
+--// RESUME AFTER DEATH
+player.CharacterAdded:Connect(function()
 
-setupHarvestPrompt = function()
-    local harvestPrompt = playerGui:FindFirstChild("harvestPrompt")
-    if harvestPrompt then
-        harvestPrompt:GetPropertyChangedSignal("Adornee"):Connect(function()
-            local adornee = harvestPrompt.Adornee
-            if adornee then
-                local flowerFolder
-                if targetFlowerType and targetFlowerType~="" then
-                    local folder = workspace:FindFirstChild("Herbs") and workspace.Herbs:FindFirstChild(targetFlowerType)
-                    flowerFolder = folder and folder:FindFirstChild("Folder")
-                else
-                    local bloodFolder = workspace:FindFirstChild("Herbs") and workspace.Herbs:FindFirstChild("Blood Flowers")
-                    flowerFolder = bloodFolder and bloodFolder:FindFirstChild("Folder")
-                end
-                if flowerFolder and adornee:IsDescendantOf(flowerFolder) then
-                    if not waitingForAdorneeClear then
-                        atFlower = true
-                        waitingForAdorneeClear = true
-                        fireHarvestRemote()
-                    end
-                end
-            else
-                if waitingForAdorneeClear then
-                    stopFloating()
-                    stopHarvestTimeout()
-                    waitingForAdorneeClear = false
-                    atFlower = false
-                    if isActive then moveToNextFlower() end
-                end
-            end
-        end)
-    else
-        playerGui.ChildAdded:Connect(function(child)
-            if child.Name=="harvestPrompt" then
-                setupHarvestPrompt()
-            end
-        end)
-    end
-end
+	task.wait(2)
 
--- Move to flower
-moveToFlower = function(flower)
-    if not flower or not flower.Parent then
-        if isActive then moveToNextFlower() end
-        return
-    end
-    if isMoving then return end
-    isMoving = true
-    local character = player.Character or player.CharacterAdded:Wait()
-    local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not hrp then isMoving=false; if isActive then moveToNextFlower() end return end
-    local targetPos = flower.Position + Vector3.new(0,3,0)
-    local distance = (hrp.Position - targetPos).Magnitude
-    local duration = math.max(0.2, distance / MOVE_SPEED)
-    local tween = TweenService:Create(hrp, TweenInfo.new(duration, Enum.EasingStyle.Linear), {CFrame = CFrame.new(targetPos)})
-    currentTween = tween
-    tween:Play()
-    tween.Completed:Connect(function()
-        isMoving=false
-        currentTween=nil
-    end)
-end
+	if herbRunning and not herbThread then
+		herbThread = task.spawn(function()
+			herbLoop()
+			herbThread = nil
+		end)
+	end
 
--- Move to next flower (wrap around)
-moveToNextFlower = function()
-    if not isActive then return end
-    local nextIndex = findNextExistingIndex(currentIndex + 1)
-    if nextIndex then
-        currentIndex = nextIndex
-        local nextFlower = getBloodFlowerByIndex(currentIndex)
-        if nextFlower then moveToFlower(nextFlower) else moveToNextFlower() end
-    else
-        currentIndex=1
-        local firstFlower = getBloodFlowerByIndex(1)
-        if firstFlower then moveToFlower(firstFlower) else isActive=false end
-    end
-end
+	if treasureRunning and not treasureThread then
+		treasureThread = task.spawn(function()
+			treasureLoop()
+			treasureThread = nil
+		end)
+	end
 
--- Start collection
-startCollection = function()
-    if isActive then return end
-    local firstIndex = findNextExistingIndex(1)
-    if not firstIndex then return end
-    isActive=true
-    currentIndex=firstIndex
-    waitingForAdorneeClear=false
-    atFlower=false
-    setupHarvestPrompt()
-    local firstFlower = getBloodFlowerByIndex(firstIndex)
-    if firstFlower then moveToFlower(firstFlower) else isActive=false end
-end
+	if altarRunning and not altarThread then
+		altarThread = task.spawn(function()
+			altarLoop()
+			altarThread = nil
+		end)
+	end
 
--- Stop collection
-stopCollection = function()
-    isActive=false
-    atFlower=false
-    waitingForAdorneeClear=false
-    stopFloating()
-    stopHarvestTimeout()
-    stopMovement()
-end
-
--- Keybind (P)
-userInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
-    if input.KeyCode==Enum.KeyCode.P then
-        if isActive then stopCollection() else startCollection() end
-    end
 end)
+
+--// UI TABS
+local HerbTab = Window:MakeTab({Name="Herbs"})
+local TreasureTab = Window:MakeTab({Name="Treasures"})
+local AltarTab = Window:MakeTab({Name="Altars"})
+local SettingsTab = Window:MakeTab({Name="Settings"})
+
+--// HERB DROPDOWN
+HerbTab:AddDropdown({
+	Name="Select Herb",
+	Default="Blood Flowers",
+	Options={
+		"Blood Flowers",
+		"Ginseng",
+		"Lingzhi",
+		"Moonlight Flowers",
+		"Qilin Berries",
+		"Spirit Grass",
+		"Taixian",
+		"Twilight Bloom",
+		"Yang Flower",
+		"Yin Bush"
+	},
+	Callback=function(v)
+		selectedHerb=v
+	end
+})
+
+--// HERB TOGGLE
+HerbTab:AddToggle({
+	Name="Start Herb Collection",
+	Default=false,
+	Callback=function(v)
+
+		herbRunning=v
+
+		if v and not herbThread then
+			herbThread = task.spawn(function()
+				herbLoop()
+				herbThread = nil
+			end)
+		end
+
+	end
+})
+
+--// TREASURE MULTI SELECT
+TreasureTab:AddToggle({
+	Name="Common",
+	Default=false,
+	Callback=function(v)
+		treasureSelection.Common=v
+	end
+})
+
+TreasureTab:AddToggle({
+	Name="Rare",
+	Default=false,
+	Callback=function(v)
+		treasureSelection.Rare=v
+	end
+})
+
+TreasureTab:AddToggle({
+	Name="Very Rare",
+	Default=false,
+	Callback=function(v)
+		treasureSelection["Very Rare"]=v
+	end
+})
+
+TreasureTab:AddToggle({
+	Name="Lost",
+	Default=false,
+	Callback=function(v)
+		treasureSelection.Lost=v
+	end
+})
+
+TreasureTab:AddToggle({
+	Name="Start Treasure Collection",
+	Default=false,
+	Callback=function(v)
+
+		treasureRunning=v
+
+		if v and not treasureThread then
+			treasureThread = task.spawn(function()
+				treasureLoop()
+				treasureThread = nil
+			end)
+		end
+
+	end
+})
+
+--// ALTARS
+AltarTab:AddToggle({
+	Name="Auto Altars",
+	Default=false,
+	Callback=function(v)
+
+		altarRunning=v
+
+		if v and not altarThread then
+			altarThread = task.spawn(function()
+				altarLoop()
+				altarThread = nil
+			end)
+		end
+
+	end
+})
+
+--// SETTINGS
+SettingsTab:AddSlider({
+	Name="Tween Speed",
+	Min=0,
+	Max=800,
+	Default=300,
+	Callback=function(v)
+		tweenSpeed=v
+	end
+})
+
+SettingsTab:AddSlider({
+	Name="Harvest Timeout",
+	Min=1,
+	Max=10,
+	Default=3,
+	Callback=function(v)
+		timeoutDuration=v
+	end
+})
 
 OrionLib:Init()

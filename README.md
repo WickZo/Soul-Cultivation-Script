@@ -1,2 +1,2 @@
 # Soul-Cultivation-Auto-Herbs
-Auto altars, chests, npcs and boss soon
+Finished Auto Altars, Chests and Herbs
